@@ -173,8 +173,8 @@ Example `customers.json` entry:
   "tenantId": "b177438a-997e-4f6e-8848-c59818a2469c",
   "oidcClientId": "bc801b15-3bad-411e-8fb2-a1f1fa14d00c",
   "location": "uksouth",
-  "resourceGroup": "BBC-Managed-Services-apoha-monitoring",
-  "workspace": "bbc-apoha-law-security"
+  "resourceGroup": "BBC-Managed-Services-Test_Customer-monitoring",
+  "workspace": "bbc-Test_Customer-law-security"
 }
 ```
 
