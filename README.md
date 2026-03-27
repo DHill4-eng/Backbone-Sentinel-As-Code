@@ -81,6 +81,7 @@ This repository provides a complete end-to-end CI/CD solution for deploying Micr
 │   └── TorExitNodes/                   # Tor exit node IP ranges
 ├── Workbooks/                          # Custom workbooks (gallery JSON)
 │   └── README.md                       # Workbook template docs
+├── customers.json                      # GitHub Actions customer targets
 ├── dependencies.json                   # Dependency graph for content items
 ├── sentinel-deployment.config          # Smart deployment configuration
 └── README.md                           # This file
@@ -89,6 +90,7 @@ This repository provides a complete end-to-end CI/CD solution for deploying Micr
 ## Features
 
 - **End-to-End Deployment**: Single pipeline provisions infrastructure via Bicep, deploys Content Hub content, custom Sentinel content, and Defender XDR custom detections
+- **Customer-Targeted GitHub Actions Runs**: Select a customer at manual run time and resolve subscription/tenant/workspace from `customers.json`
 - **Smart Infrastructure Checks**: Detects existing resources and skips Bicep deployment if infrastructure is already in place
 - **Smart Deployment**: Use git diff to detect changed files and only deploy modified content — state file tracks deployment outcomes across runs to automatically retry previously failed items
 - **Dependency Graph System**: Declare prerequisites per content item (tables, watchlists, functions); pre-flight checks validate dependencies, missing detections deploy disabled
@@ -150,6 +152,31 @@ This repository provides a complete end-to-end CI/CD solution for deploying Micr
    - Deploy Content Hub solutions and content
    - Deploy custom content (analytical rules, watchlists, playbooks, workbooks, hunting queries, parsers, automation rules, summary rules)
    - Deploy Defender XDR custom detection rules via Graph API
+
+## GitHub Actions Customer Selection
+
+The GitHub Actions workflow at `.github/workflows/sentinel-deploy.yml` is configured for **manual-only** runs (`workflow_dispatch`) and uses `customers.json` at the repo root as the source of truth for deployment targets.
+
+When you run the workflow manually, provide the `customer` input with an exact `name` match from `customers.json`.
+
+- The workflow resolves and validates the selected customer before any deployment stages run
+- Required fields: `name`, `subscriptionId`, `tenantId`, `oidcClientId`, `location`, `resourceGroup`, `workspace`
+- Backward compatibility: `resourceGroupName` is accepted as an alias for `resourceGroup`
+- If required fields are missing, the workflow fails fast with a clear validation error
+
+Example `customers.json` entry:
+
+```json
+{
+  "name": "Test_Customer",
+  "subscriptionId": "87f4a147-e079-4309-b2bf-534fef047a0d",
+  "tenantId": "b177438a-997e-4f6e-8848-c59818a2469c",
+  "oidcClientId": "bc801b15-3bad-411e-8fb2-a1f1fa14d00c",
+  "location": "uksouth",
+  "resourceGroup": "BBC-Managed-Services-apoha-monitoring",
+  "workspace": "bbc-apoha-law-security"
+}
+```
 
 ## Documentation
 

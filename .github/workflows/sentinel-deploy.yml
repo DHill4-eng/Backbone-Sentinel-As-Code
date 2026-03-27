@@ -8,16 +8,12 @@
 #   - Federated credentials (OIDC) configured for this repo
 #   - CustomDetection.ReadWrite.All Graph permission for Stage 5
 #
-# Required secrets:
-#   AZURE_CLIENT_ID        - Service Principal Application (client) ID
-#   AZURE_TENANT_ID        - Entra ID Tenant ID
-#   AZURE_SUBSCRIPTION_ID  - Azure Subscription ID
+# Required repository file:
+#   customers.json - Customer deployment targets (name, subscriptionId, tenantId,
+#                    oidcClientId, location, resourceGroup/resourceGroupName, workspace)
 #
-# Required variables (Settings > Secrets and variables > Variables):
-#   SENTINEL_RESOURCE_GROUP   - Resource Group name
-#   SENTINEL_WORKSPACE_NAME   - Log Analytics workspace name
-#   SENTINEL_REGION           - Azure region (e.g., uksouth)
-#   PLAYBOOK_RESOURCE_GROUP   - (Optional) Resource Group for playbooks, defaults to SENTINEL_RESOURCE_GROUP
+# Optional variables (Settings > Secrets and variables > Variables):
+#   PLAYBOOK_RESOURCE_GROUP   - (Optional) Resource Group for playbooks
 #
 # Authentication: Uses OIDC (federated credentials) by default.
 # ---------------------------------------------------------------------------
@@ -27,6 +23,11 @@ name: Deploy Sentinel
 on:
   workflow_dispatch:
     inputs:
+      customer:
+        description: "Customer name (must exactly match customers.json)"
+        type: string
+        required: true
+
       # ── Stage Toggles ────────────────────────────────────────────────
       deploy_infrastructure:
         description: "Stage 1-2: Deploy Infrastructure (Bicep)"
@@ -137,35 +138,141 @@ on:
         type: boolean
         default: false
 
-  schedule:
-    - cron: "0 4 * * 1"  # Weekly Monday 04:00 UTC
-
 permissions:
   id-token: write
   contents: read
 
-env:
-  RESOURCE_GROUP: ${{ vars.SENTINEL_RESOURCE_GROUP }}
-  WORKSPACE_NAME: ${{ vars.SENTINEL_WORKSPACE_NAME }}
-  REGION: ${{ vars.SENTINEL_REGION }}
-
 jobs:
+  # ===========================================================================
+  # Resolve Customer from customers.json
+  # ===========================================================================
+  resolve-customer:
+    name: "Resolve Customer"
+    runs-on: ubuntu-latest
+    outputs:
+      customer_name: ${{ steps.resolve.outputs.customer_name }}
+      customer_key: ${{ steps.resolve.outputs.customer_key }}
+      subscription_id: ${{ steps.resolve.outputs.subscription_id }}
+      tenant_id: ${{ steps.resolve.outputs.tenant_id }}
+      oidc_client_id: ${{ steps.resolve.outputs.oidc_client_id }}
+      region: ${{ steps.resolve.outputs.region }}
+      resource_group: ${{ steps.resolve.outputs.resource_group }}
+      workspace_name: ${{ steps.resolve.outputs.workspace_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Customer Configuration
+        id: resolve
+        shell: pwsh
+        run: |
+          $customersPath = Join-Path $env:GITHUB_WORKSPACE "customers.json"
+          if (-not (Test-Path $customersPath)) {
+            throw "customers.json not found at '$customersPath'."
+          }
+
+          try {
+            $customers = Get-Content -Path $customersPath -Raw | ConvertFrom-Json -ErrorAction Stop
+          }
+          catch {
+            throw "Failed to parse customers.json: $($_.Exception.Message)"
+          }
+
+          if ($customers -isnot [System.Array]) {
+            $customers = @($customers)
+          }
+
+          if ($customers.Count -eq 0) {
+            throw "customers.json contains no customer entries."
+          }
+
+          $selectedCustomerName = "${{ inputs.customer }}"
+          if ([string]::IsNullOrWhiteSpace($selectedCustomerName)) {
+            throw "Input 'customer' is required."
+          }
+
+          $matches = @($customers | Where-Object { $_.name -ceq $selectedCustomerName })
+          if ($matches.Count -eq 0) {
+            $validNames = @($customers | ForEach-Object { $_.name } | Sort-Object) -join ", "
+            throw "Unknown customer '$selectedCustomerName'. Valid customers: $validNames"
+          }
+          if ($matches.Count -gt 1) {
+            throw "Multiple customers with the same name '$selectedCustomerName' found in customers.json. Names must be unique."
+          }
+
+          $customer = $matches[0]
+          $resourceGroup = if (-not [string]::IsNullOrWhiteSpace([string]$customer.resourceGroup)) {
+            [string]$customer.resourceGroup
+          }
+          elseif (-not [string]::IsNullOrWhiteSpace([string]$customer.resourceGroupName)) {
+            [string]$customer.resourceGroupName
+          }
+          else {
+            $null
+          }
+
+          $resolved = [ordered]@{
+            name           = [string]$customer.name
+            subscriptionId = [string]$customer.subscriptionId
+            tenantId       = [string]$customer.tenantId
+            oidcClientId   = [string]$customer.oidcClientId
+            location       = [string]$customer.location
+            resourceGroup  = [string]$resourceGroup
+            workspace      = [string]$customer.workspace
+          }
+
+          $missing = @()
+          foreach ($kvp in $resolved.GetEnumerator()) {
+            if ([string]::IsNullOrWhiteSpace([string]$kvp.Value)) {
+              $missing += $kvp.Key
+            }
+          }
+          if ($missing.Count -gt 0) {
+            throw "Customer '$($resolved.name)' is missing required field(s): $($missing -join ', ')."
+          }
+
+          $customerKey = $resolved.name.ToLowerInvariant() -replace '[^a-z0-9._-]', '-'
+          if ([string]::IsNullOrWhiteSpace($customerKey)) {
+            $customerKey = "customer"
+          }
+
+          Write-Host "Resolved customer: $($resolved.name)"
+          Write-Host "Subscription: $($resolved.subscriptionId)"
+          Write-Host "Tenant: $($resolved.tenantId)"
+          Write-Host "Resource Group: $($resolved.resourceGroup)"
+          Write-Host "Workspace: $($resolved.workspace)"
+          Write-Host "Region: $($resolved.location)"
+
+          "customer_name=$($resolved.name)" >> $env:GITHUB_OUTPUT
+          "customer_key=$customerKey" >> $env:GITHUB_OUTPUT
+          "subscription_id=$($resolved.subscriptionId)" >> $env:GITHUB_OUTPUT
+          "tenant_id=$($resolved.tenantId)" >> $env:GITHUB_OUTPUT
+          "oidc_client_id=$($resolved.oidcClientId)" >> $env:GITHUB_OUTPUT
+          "region=$($resolved.location)" >> $env:GITHUB_OUTPUT
+          "resource_group=$($resolved.resourceGroup)" >> $env:GITHUB_OUTPUT
+          "workspace_name=$($resolved.workspace)" >> $env:GITHUB_OUTPUT
+
   # ===========================================================================
   # Stage 1: Check Existing Infrastructure
   # ===========================================================================
   check-infrastructure:
     name: "Check Existing Infrastructure"
     runs-on: ubuntu-latest
+    needs: resolve-customer
     if: ${{ inputs.deploy_infrastructure != false }}
+    env:
+      RESOURCE_GROUP: ${{ needs.resolve-customer.outputs.resource_group }}
+      WORKSPACE_NAME: ${{ needs.resolve-customer.outputs.workspace_name }}
+      REGION: ${{ needs.resolve-customer.outputs.region }}
     outputs:
       resources_exist: ${{ steps.check.outputs.resources_exist }}
     steps:
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ needs.resolve-customer.outputs.oidc_client_id }}
+          tenant-id: ${{ needs.resolve-customer.outputs.tenant_id }}
+          subscription-id: ${{ needs.resolve-customer.outputs.subscription_id }}
 
       - name: Check for Existing Resources
         id: check
@@ -200,11 +307,16 @@ jobs:
   deploy-infrastructure:
     name: "Deploy Sentinel Infrastructure (Bicep)"
     runs-on: ubuntu-latest
-    needs: check-infrastructure
+    needs: [resolve-customer, check-infrastructure]
     if: |
       always() &&
+      needs.resolve-customer.result == 'success' &&
       needs.check-infrastructure.result == 'success' &&
       needs.check-infrastructure.outputs.resources_exist == 'false'
+    env:
+      RESOURCE_GROUP: ${{ needs.resolve-customer.outputs.resource_group }}
+      WORKSPACE_NAME: ${{ needs.resolve-customer.outputs.workspace_name }}
+      REGION: ${{ needs.resolve-customer.outputs.region }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -212,9 +324,9 @@ jobs:
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ needs.resolve-customer.outputs.oidc_client_id }}
+          tenant-id: ${{ needs.resolve-customer.outputs.tenant_id }}
+          subscription-id: ${{ needs.resolve-customer.outputs.subscription_id }}
 
       - name: Register Resource Providers
         uses: azure/cli@v2
@@ -260,7 +372,7 @@ jobs:
                 Authorization  = "Bearer $accessToken"
                 'Content-Type' = 'application/json'
             }
-            $baseUri = "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.RESOURCE_GROUP }}/providers/Microsoft.OperationalInsights/workspaces/${{ env.WORKSPACE_NAME }}"
+            $baseUri = "https://management.azure.com/subscriptions/${{ needs.resolve-customer.outputs.subscription_id }}/resourceGroups/${{ env.RESOURCE_GROUP }}/providers/Microsoft.OperationalInsights/workspaces/${{ env.WORKSPACE_NAME }}"
             $api = "api-version=2024-01-01-preview"
 
             $settings = @(
@@ -315,11 +427,16 @@ jobs:
   deploy-content-hub:
     name: "Deploy Sentinel Content Hub"
     runs-on: ubuntu-latest
-    needs: [check-infrastructure, deploy-infrastructure]
+    needs: [resolve-customer, check-infrastructure, deploy-infrastructure]
     if: |
       always() &&
+      needs.resolve-customer.result == 'success' &&
       (inputs.deploy_content_hub != false) &&
       (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped')
+    env:
+      RESOURCE_GROUP: ${{ needs.resolve-customer.outputs.resource_group }}
+      WORKSPACE_NAME: ${{ needs.resolve-customer.outputs.workspace_name }}
+      REGION: ${{ needs.resolve-customer.outputs.region }}
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -328,9 +445,9 @@ jobs:
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ needs.resolve-customer.outputs.oidc_client_id }}
+          tenant-id: ${{ needs.resolve-customer.outputs.tenant_id }}
+          subscription-id: ${{ needs.resolve-customer.outputs.subscription_id }}
 
       - name: Deploy Content Hub Solutions
         uses: azure/powershell@v2
@@ -341,7 +458,7 @@ jobs:
             $severityList = "${{ inputs.severities_to_include || 'High,Medium,Low,Informational' }}" -split ',' | ForEach-Object { $_.Trim() }
 
             $scriptParams = @{
-                SubscriptionId      = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+                SubscriptionId      = "${{ needs.resolve-customer.outputs.subscription_id }}"
                 ResourceGroup       = "${{ env.RESOURCE_GROUP }}"
                 Workspace           = "${{ env.WORKSPACE_NAME }}"
                 Region              = "${{ env.REGION }}"
@@ -365,11 +482,16 @@ jobs:
   deploy-custom-content:
     name: "Deploy Custom Content"
     runs-on: ubuntu-latest
-    needs: [check-infrastructure, deploy-infrastructure, deploy-content-hub]
+    needs: [resolve-customer, check-infrastructure, deploy-infrastructure, deploy-content-hub]
     if: |
       always() &&
+      needs.resolve-customer.result == 'success' &&
       (inputs.deploy_custom_content != false) &&
       (needs.deploy-content-hub.result == 'success' || needs.deploy-content-hub.result == 'skipped')
+    env:
+      RESOURCE_GROUP: ${{ needs.resolve-customer.outputs.resource_group }}
+      WORKSPACE_NAME: ${{ needs.resolve-customer.outputs.workspace_name }}
+      REGION: ${{ needs.resolve-customer.outputs.region }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -382,16 +504,16 @@ jobs:
         continue-on-error: true
         with:
           path: ${{ github.workspace }}/.deployment-state.json
-          key: deployment-state-${{ env.WORKSPACE_NAME }}-
+          key: deployment-state-${{ needs.resolve-customer.outputs.customer_key }}-${{ env.WORKSPACE_NAME }}-
           restore-keys: |
-            deployment-state-${{ env.WORKSPACE_NAME }}-
+            deployment-state-${{ needs.resolve-customer.outputs.customer_key }}-${{ env.WORKSPACE_NAME }}-
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ needs.resolve-customer.outputs.oidc_client_id }}
+          tenant-id: ${{ needs.resolve-customer.outputs.tenant_id }}
+          subscription-id: ${{ needs.resolve-customer.outputs.subscription_id }}
 
       - name: Install powershell-yaml Module
         shell: pwsh
@@ -404,7 +526,7 @@ jobs:
           azPSVersion: "latest"
           inlineScript: |
             $scriptParams = @{
-                SubscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+                SubscriptionId = "${{ needs.resolve-customer.outputs.subscription_id }}"
                 ResourceGroup  = "${{ env.RESOURCE_GROUP }}"
                 Workspace      = "${{ env.WORKSPACE_NAME }}"
                 Region         = "${{ env.REGION }}"
@@ -433,7 +555,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}/.deployment-state.json
-          key: deployment-state-${{ env.WORKSPACE_NAME }}-${{ github.run_id }}
+          key: deployment-state-${{ needs.resolve-customer.outputs.customer_key }}-${{ env.WORKSPACE_NAME }}-${{ github.run_id }}
 
   # ===========================================================================
   # Stage 5: Deploy Defender XDR Custom Detections
@@ -441,9 +563,10 @@ jobs:
   deploy-defender-detections:
     name: "Deploy Defender XDR Custom Detections"
     runs-on: ubuntu-latest
-    needs: [check-infrastructure, deploy-infrastructure, deploy-content-hub, deploy-custom-content]
+    needs: [resolve-customer, check-infrastructure, deploy-infrastructure, deploy-content-hub, deploy-custom-content]
     if: |
       always() &&
+      needs.resolve-customer.result == 'success' &&
       (inputs.deploy_defender_detections != false) &&
       (needs.deploy-custom-content.result == 'success' || needs.deploy-custom-content.result == 'skipped')
     timeout-minutes: 30
@@ -454,9 +577,9 @@ jobs:
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ needs.resolve-customer.outputs.oidc_client_id }}
+          tenant-id: ${{ needs.resolve-customer.outputs.tenant_id }}
+          subscription-id: ${{ needs.resolve-customer.outputs.subscription_id }}
 
       - name: Install powershell-yaml Module
         shell: pwsh

@@ -676,6 +676,12 @@ function Connect-AzureEnvironment {
         $script:SubscriptionId = $context.Subscription.Id
     }
 
+    # Capture tenant ID for ARM parameter auto-injection (for example, tenantId).
+    $script:TenantId = $null
+    if ($context -and $context.Subscription -and $context.Subscription.TenantId) {
+        $script:TenantId = $context.Subscription.TenantId
+    }
+
     Write-PipelineMessage "Authenticated to subscription: $($context.Subscription.Id) ($($context.Subscription.Name))" -Level Success
 
     $script:ServerUrl = if ($IsGov) {
@@ -1418,6 +1424,10 @@ function Deploy-CustomPlaybooks {
     }
     if ($script:WorkspaceId) {
         $knownParams['WorkspaceId'] = $script:WorkspaceId
+    }
+    if ($script:TenantId) {
+        $knownParams['TenantId'] = $script:TenantId
+        $knownParams['tenantId'] = $script:TenantId
     }
 
     foreach ($templateFile in $orderedFiles) {

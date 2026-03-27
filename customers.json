@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Cyber-Benchmark",
+    "subscriptionId": "003b8974-6720-4fd9-a9f3-390b6403a066",
+    "tenantId": "5b331fab-b307-4d09-b790-86512ea7f40d",
+    "oidcClientId": "b20dc747-3561-45f5-a13f-f93e0f3b79ff",
+    "location": "uksouth"
+  },
+  {
+    "name": "Apoha",
+    "subscriptionId": "87f4a147-e079-4309-b2bf-534fef047a0d",
+    "tenantId": "b177438a-997e-4f6e-8848-c59818a2469c",
+    "resourceGroupName": "bbc-managed-services-apoha-monitoring",
+    "oidcClientId": "bc801b15-3bad-411e-8fb2-a1f1fa14d00c",
+    "location": "uksouth",
+    "resourceGroup": "BBC-Managed-Services-apoha-monitoring",
+    "workspace": "bbc-apoha-law-security"
+  },
+  {
+    "name": "Backbone-Connect",
+    "subscriptionId": "1d995080-d453-4626-9e4f-d7da45f2eec4",
+    "tenantId": "e08bacf1-1696-414a-bdb3-817a8e39f3c6",
+    "resourceGroupName": "rg_sen_bbcinternal",
+    "oidcClientId": "5f380442-e698-4dd3-98b7-c3f4876b359b",
+    "location": "uksouth",
+    "resourceGroup": "rg_sen_bbcinternal",
+    "workspace": "BBCInternal"
+  }
+    ]
+

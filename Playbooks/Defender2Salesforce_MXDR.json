@@ -1,0 +1,757 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "Defender2Salesforce"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2017-07-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "object"
+            }
+          },
+          "triggers": {
+            "Poll_Defender_API_every_10_minutes": {
+              "recurrence": {
+                "interval": 10,
+                "frequency": "Minute",
+                "timeZone": "GMT Standard Time"
+              },
+              "evaluatedRecurrence": {
+                "interval": 10,
+                "frequency": "Minute",
+                "timeZone": "GMT Standard Time"
+              },
+              "type": "Recurrence"
+            }
+          },
+          "actions": {
+            "Retrieve_Defender_Updates": {
+              "runAfter": {},
+              "type": "Http",
+              "inputs": {
+                "uri": "@concat(\r\n    'https://graph.microsoft.com/v1.0/security/incidents?$filter=lastUpdateDateTime ge ',\r\n    formatDateTime(addMinutes(utcNow(), -60), 'yyyy-MM-ddTHH:mm:ssZ'),\r\n    ' and severity ne ''informational'''\r\n)\r\n",
+                "method": "GET",
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://graph.microsoft.com"
+                }
+              }
+            },
+            "Parse_JSON_from_incident_updates": {
+              "runAfter": {
+                "Retrieve_Defender_Updates": [
+                  "Succeeded"
+                ]
+              },
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@body('Retrieve_Defender_Updates')",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "odata.context": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "tenantId": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "incidentWebUrl": {
+                            "type": "string"
+                          },
+                          "redirectIncidentId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "displayName": {
+                            "type": "string"
+                          },
+                          "createdDateTime": {
+                            "type": "string"
+                          },
+                          "lastUpdateDateTime": {
+                            "type": "string"
+                          },
+                          "assignedTo": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "classification": {
+                            "type": "string"
+                          },
+                          "determination": {
+                            "type": "string"
+                          },
+                          "severity": {
+                            "type": "string"
+                          },
+                          "customTags": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "systemTags": {
+                            "type": "array"
+                          },
+                          "description": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "lastModifiedBy": {
+                            "type": "string"
+                          },
+                          "resolvingComment": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "summary": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "comments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "comment": {
+                                  "type": "string"
+                                },
+                                "createdByDisplayName": {
+                                  "type": "string"
+                                },
+                                "createdDateTime": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "comment",
+                                "createdByDisplayName",
+                                "createdDateTime"
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "tenantId",
+                          "status",
+                          "incidentWebUrl",
+                          "displayName",
+                          "createdDateTime",
+                          "lastUpdateDateTime",
+                          "classification",
+                          "determination",
+                          "severity",
+                          "customTags",
+                          "systemTags",
+                          "lastModifiedBy",
+                          "comments"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "For_each": {
+              "foreach": "@body('Parse_JSON_from_incident_updates')?['value']",
+              "actions": {
+                "Get_incident_details": {
+                  "type": "Http",
+                  "inputs": {
+                    "uri": "@concat('https://graph.microsoft.com/v1.0/security/incidents/', items('For_each')?['id'])",
+                    "method": "GET",
+                    "headers": {
+                      "Content-Type": "application/json"
+                    },
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://graph.microsoft.com"
+                    }
+                  }
+                },
+                "Get_incident_alerts": {
+                  "runAfter": {
+                    "Get_incident_details": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Http",
+                  "inputs": {
+                    "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('For_each')?['id']}/alerts",
+                    "method": "GET",
+                    "headers": {
+                      "Content-Type": "application/json"
+                    },
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://graph.microsoft.com"
+                    }
+                  }
+                },
+                "Parse_JSON_alerts": {
+                  "runAfter": {
+                    "Get_incident_alerts": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@body('Get_incident_alerts')",
+                    "schema": {
+                      "type": "object",
+                      "properties": {
+                        "odata.context": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "id",
+                              "tenantId"
+                            ],
+                            "additionalProperties": true,
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "tenantId": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "Compose_-_first_alert": {
+                  "runAfter": {
+                    "Parse_JSON_alerts": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@if(greater(length(body('Parse_JSON_alerts')?['value']), 0), first(body('Parse_JSON_alerts')?['value']), null)"
+                },
+                "Get_records": {
+                  "runAfter": {
+                    "Compose_-_first_alert": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                      }
+                    },
+                    "method": "get",
+                    "path": "/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items",
+                    "queries": {
+                      "$filter": "@concat(\n    'Sentinel_Arm_ID__c eq ''',\n    concat(items('For_each')?['tenantId'], '_', items('For_each')?['id']),\n    ''''\n)\n",
+                      "$top": 1
+                    }
+                  }
+                },
+                "Is_redirected_incident": {
+                  "actions": {
+                    "Get_redirect_incident_details": {
+                      "type": "Http",
+                      "inputs": {
+                        "uri": "@concat('https://graph.microsoft.com/v1.0/security/incidents/', body('Get_incident_details')?['redirectIncidentId'])",
+                        "method": "GET",
+                        "headers": {
+                          "Content-Type": "application/json"
+                        },
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "audience": "https://graph.microsoft.com"
+                        }
+                      }
+                    },
+                    "Get_new_redirected_case": {
+                      "runAfter": {
+                        "Get_redirect_incident_details": [
+                          "Succeeded",
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      },
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                          }
+                        },
+                        "method": "get",
+                        "path": "/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items",
+                        "queries": {
+                          "$filter": "@concat('Sentinel_Arm_ID__c eq ''', body('Get_incident_details')?['tenantId'], '_', body('Get_incident_details')?['redirectIncidentId'], '''')",
+                          "$top": 1
+                        }
+                      }
+                    },
+                    "If_old_case_exists_close_it": {
+                      "actions": {
+                        "Close_old_case_as_redirected": {
+                          "type": "ApiConnection",
+                          "inputs": {
+                            "host": {
+                              "connection": {
+                                "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                              }
+                            },
+                            "method": "patch",
+                            "body": {
+                              "BusinessHoursId": "01m3z000000olnX",
+                              "Status": "Closed",
+                              "Updated_From_Defender__c": true,
+                              "Do_Not_Reassign__c": true
+                            },
+                            "path": "/v3/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items/@{encodeURIComponent(encodeURIComponent(first(body('Get_records')?['value'])?['Id']))}"
+                          }
+                        },
+                        "Create_redirect_case_comment": {
+                          "runAfter": {
+                            "Close_old_case_as_redirected": [
+                              "Succeeded"
+                            ]
+                          },
+                          "type": "ApiConnection",
+                          "inputs": {
+                            "host": {
+                              "connection": {
+                                "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                              }
+                            },
+                            "method": "post",
+                            "body": {
+                              "ParentId": "@{first(body('Get_records')?['value'])?['Id']}",
+                              "IsPublished": false,
+                              "CommentBody": "@{concat(\n  'Defender correlation: incident redirected/merged at ', utcNow(), '\\n',\n  'Old Incident ID: ', items('For_each')?['id'], '\\n',\n  'Old Incident URL: ', items('For_each')?['incidentWebUrl'], '\\n',\n  'New Incident ID: ', body('Get_incident_details')?['redirectIncidentId'], '\\n',\n  'New Defender Incident URL: ', coalesce(body('Get_redirect_incident_details')?['incidentWebUrl'], ''), '\\n',\n  'New Salesforce Case: ',\n  if(\n    empty(body('Get_new_redirected_case')?['value']),\n    'Not yet created/found',\n    concat(\n      first(body('Get_new_redirected_case')?['value'])?['CaseNumber'],\n      ' (https://backboneconnect.lightning.force.com/lightning/r/Case/',\n      first(body('Get_new_redirected_case')?['value'])?['Id'],\n      '/view)'\n    )\n  ),\n  '\\n'\n)}"
+                            },
+                            "path": "/v2/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('CaseComment'))}/items"
+                          }
+                        }
+                      },
+                      "runAfter": {
+                        "Get_new_redirected_case": [
+                          "Succeeded",
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      },
+                      "else": {
+                        "actions": {}
+                      },
+                      "expression": {
+                        "and": [
+                          {
+                            "equals": [
+                              "@empty(body('Get_records')?['value'])",
+                              false
+                            ]
+                          }
+                        ]
+                      },
+                      "type": "If"
+                    }
+                  },
+                  "runAfter": {
+                    "Get_records": [
+                      "Succeeded"
+                    ]
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "expression": {
+                    "and": [
+                      {
+                        "not": {
+                          "equals": [
+                            "@body('Get_incident_details')?['redirectIncidentId']",
+                            null
+                          ]
+                        }
+                      },
+                      {
+                        "not": {
+                          "equals": [
+                            "@string(body('Get_incident_details')?['redirectIncidentId'])",
+                            ""
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  "type": "If"
+                },
+                "Process_normal_incident_only": {
+                  "actions": {
+                    "Is_case_closed": {
+                      "actions": {},
+                      "else": {
+                        "actions": {
+                          "Get_records_-_Tenant_IDs": {
+                            "type": "ApiConnection",
+                            "inputs": {
+                              "host": {
+                                "connection": {
+                                  "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                                }
+                              },
+                              "method": "get",
+                              "path": "/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Tenant_ID__c'))}/items",
+                              "queries": {
+                                "$filter": "@concat('Name eq ''', items('For_each')?['tenantId'], '''')",
+                                "$top": 1
+                              }
+                            }
+                          },
+                          "map_defender_status_to_salesforce": {
+                            "runAfter": {
+                              "Get_records_-_Tenant_IDs": [
+                                "Succeeded"
+                              ]
+                            },
+                            "type": "Compose",
+                            "inputs": "@if(\n  equals(toLower(items('For_each')?['status']), 'active'),\n  'New',\n  if(\n    equals(toLower(items('For_each')?['status']), 'inprogress'),\n    'Open',\n    if(\n      equals(toLower(items('For_each')?['status']), 'resolved'),\n      'Closed',\n      null\n    )\n  )\n)\n"
+                          },
+                          "Compose_-_map_classification": {
+                            "runAfter": {
+                              "map_defender_status_to_salesforce": [
+                                "Succeeded"
+                              ]
+                            },
+                            "type": "Compose",
+                            "inputs": {
+                              "truePositive": "True Positive",
+                              "falsePositive": "False Positive",
+                              "informationalExpectedActivity": "Informational, Expected Activity",
+                              "unknown": "Unknown",
+                              "other": "Unknown",
+                              "null": "Unknown"
+                            }
+                          },
+                          "Compose_-_selected_classification": {
+                            "runAfter": {
+                              "Compose_-_map_classification": [
+                                "Succeeded"
+                              ]
+                            },
+                            "type": "Compose",
+                            "inputs": "@{if(\r\n    contains(outputs('Compose_-_map_classification'), body('Get_incident_details')?['classification']),\r\n    outputs('Compose_-_map_classification')[body('Get_incident_details')?['classification']],\r\n    'Unknown'\r\n)}\n"
+                          },
+                          "Compose_-_map_determination": {
+                            "runAfter": {
+                              "Compose_-_selected_classification": [
+                                "Succeeded"
+                              ]
+                            },
+                            "type": "Compose",
+                            "inputs": {
+                              "multiStagedAttack": "Multi Staged Attack",
+                              "malware": "Malware",
+                              "maliciousUserActivity": "Malicious User Activity",
+                              "unwantedSoftware": "Unwanted Software",
+                              "phishing": "Phishing",
+                              "compromisedAccount": "Compromised Account",
+                              "securityTesting": "Security Testing",
+                              "confirmedActivity": "Confirmed Activity",
+                              "lineOfBusinessApplication": "Line of Business Application",
+                              "notEnoughDataToValidate": "Not Enough Data To Validate",
+                              "notMalicious": "Not Malicious",
+                              "unknown": "Unknown",
+                              "other": "Other",
+                              "null": "Unknown"
+                            }
+                          },
+                          "Compose_-_selected_subcategory": {
+                            "runAfter": {
+                              "Compose_-_map_determination": [
+                                "Succeeded"
+                              ]
+                            },
+                            "type": "Compose",
+                            "inputs": "@if(\r\n    contains(outputs('Compose_-_map_determination'), body('Get_incident_details')?['determination']),\r\n    outputs('Compose_-_map_determination')[body('Get_incident_details')?['determination']],\r\n    'Unknown'\r\n)"
+                          },
+                          "Condition": {
+                            "actions": {
+                              "Create_record": {
+                                "type": "ApiConnection",
+                                "inputs": {
+                                  "host": {
+                                    "connection": {
+                                      "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                                    }
+                                  },
+                                  "method": "post",
+                                  "body": {
+                                    "BusinessHoursId": "01m3z000000olnX",
+                                    "Origin": "Microsoft Defender XDR",
+                                    "Subject": "@coalesce(body('Get_incident_details')?['displayName'], concat('Defender Incident ', items('For_each')?['id']))",
+                                    "Priority": "@items('For_each')?['severity']",
+                                    "Type": "Incident",
+                                    "RecordTypeId": "0123z000000t6U9AAI",
+                                    "Reason": "Security",
+                                    "OwnerId": "00G3z000005jHcHEAU",
+                                    "Reason_Details_Impact__c": "Unknown",
+                                    "Alert_URL__c": "@{items('For_each')?['incidentWebUrl']}",
+                                    "Sentinel_Arm_ID__c": "@concat(items('For_each')?['tenantId'], '_', items('For_each')?['id'])",
+                                    "Tenant_ID__c": "@body('Get_records_-_Tenant_IDs')?['value']?[0]?['Id']",
+                                    "Incident_Description__c": "@{concat(\n  'Detection Source: ', coalesce(outputs('Compose_-_first_alert')?['detectionSource'], 'Unknown'), '<br/>',\n  'Title: ', coalesce(outputs('Compose_-_first_alert')?['title'], body('Get_incident_details')?['displayName'], 'No title'), '<br/>',\n  'Description: ', coalesce(outputs('Compose_-_first_alert')?['description'], body('Get_incident_details')?['description'], 'No description returned'), '<br/><br/>',\n  'Last sync time with Defender: ', utcNow()\n)}",
+                                    "Details_Impact_Sub_Category__c": "Unknown",
+                                    "Updated_From_Defender__c": true,
+                                    "Do_Not_Reassign__c": true
+                                  },
+                                  "path": "/v2/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items"
+                                }
+                              },
+                              "Add_case_ID_as_Defender_comment": {
+                                "runAfter": {
+                                  "Create_record": [
+                                    "Succeeded"
+                                  ]
+                                },
+                                "type": "Http",
+                                "inputs": {
+                                  "uri": "https://graph.microsoft.com/v1.0/security/incidents/@{items('For_each')?['id']}/comments",
+                                  "method": "POST",
+                                  "headers": {
+                                    "Content-Type": "application/json"
+                                  },
+                                  "body": {
+                                    "comment": "Salesforce case created: @{body('Create_record')?['CaseNumber']} (https://backboneconnect.lightning.force.com/lightning/r/Case/@{body('Create_record')?['Id']}/view)"
+                                  },
+                                  "authentication": {
+                                    "type": "ManagedServiceIdentity",
+                                    "audience": "https://graph.microsoft.com"
+                                  }
+                                }
+                              }
+                            },
+                            "runAfter": {
+                              "Compose_-_selected_subcategory": [
+                                "Succeeded"
+                              ]
+                            },
+                            "else": {
+                              "actions": {
+                                "For_each_1": {
+                                  "foreach": "@body('Get_records')?['value']",
+                                  "actions": {
+                                    "Is_case_pending": {
+                                      "actions": {
+                                        "Update_record_(V3)_-_Pending_no_status_write": {
+                                          "type": "ApiConnection",
+                                          "inputs": {
+                                            "host": {
+                                              "connection": {
+                                                "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                                              }
+                                            },
+                                            "method": "patch",
+                                            "body": {
+                                              "BusinessHoursId": "01m3z000000olnX",
+                                              "Origin": "Microsoft Defender XDR",
+                                              "Priority": "@items('For_each')?['severity']",
+                                              "OwnerId": "@item()?['OwnerId']",
+                                              "Reason_Details_Impact__c": "@{outputs('Compose_-_selected_classification')}",
+                                              "Incident_Description__c": "@{concat(\n  'Detection Source: ', coalesce(outputs('Compose_-_first_alert')?['detectionSource'], 'Unknown'), '<br/>',\n  'Title: ', coalesce(outputs('Compose_-_first_alert')?['title'], body('Get_incident_details')?['displayName'], 'No title'), '<br/>',\n  'Description: ', coalesce(outputs('Compose_-_first_alert')?['description'], body('Get_incident_details')?['description'], 'No description returned'), '<br/><br/>',\n  'Last sync time with Defender: ', utcNow()\n)}",
+                                              "Details_Impact_Sub_Category__c": "@{outputs('Compose_-_selected_subcategory')}",
+                                              "Updated_From_Defender__c": true,
+                                              "Do_Not_Reassign__c": true
+                                            },
+                                            "path": "/v3/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items/@{encodeURIComponent(encodeURIComponent(item()?['Id']))}"
+                                          }
+                                        }
+                                      },
+                                      "else": {
+                                        "actions": {
+                                          "Update_record_(V3)_-_Normal_with_status_write": {
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                              "host": {
+                                                "connection": {
+                                                  "name": "@parameters('$connections')['salesforce-1']['connectionId']"
+                                                }
+                                              },
+                                              "method": "patch",
+                                              "body": {
+                                                "BusinessHoursId": "01m3z000000olnX",
+                                                "Status": "@{outputs('map_defender_status_to_salesforce')}",
+                                                "Origin": "Microsoft Defender XDR",
+                                                "Priority": "@items('For_each')?['severity']",
+                                                "OwnerId": "@item()?['OwnerId']",
+                                                "Reason_Details_Impact__c": "@{outputs('Compose_-_selected_classification')}",
+                                                "Incident_Description__c": "@{concat(\n  'Detection Source: ', coalesce(outputs('Compose_-_first_alert')?['detectionSource'], 'Unknown'), '<br/>',\n  'Title: ', coalesce(outputs('Compose_-_first_alert')?['title'], body('Get_incident_details')?['displayName'], 'No title'), '<br/>',\n  'Description: ', coalesce(outputs('Compose_-_first_alert')?['description'], body('Get_incident_details')?['description'], 'No description returned'), '<br/><br/>',\n  'Last sync time with Defender: ', utcNow()\n)}",
+                                                "Details_Impact_Sub_Category__c": "@{outputs('Compose_-_selected_subcategory')}",
+                                                "Updated_From_Defender__c": true,
+                                                "Do_Not_Reassign__c": true
+                                              },
+                                              "path": "/v3/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items/@{encodeURIComponent(encodeURIComponent(item()?['Id']))}"
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "expression": {
+                                        "equals": [
+                                          "@toLower(item()?['Status'])",
+                                          "pending"
+                                        ]
+                                      },
+                                      "type": "If"
+                                    }
+                                  },
+                                  "type": "Foreach"
+                                }
+                              }
+                            },
+                            "expression": {
+                              "and": [
+                                {
+                                  "equals": [
+                                    "@empty(body('Get_records')?['value'])",
+                                    true
+                                  ]
+                                }
+                              ]
+                            },
+                            "type": "If"
+                          }
+                        }
+                      },
+                      "expression": {
+                        "and": [
+                          {
+                            "equals": [
+                              "@toLower(items('For_each')?['status'])",
+                              "resolved"
+                            ]
+                          },
+                          {
+                            "equals": [
+                              "@if(and(not(empty(body('Get_records')?['value'])), not(empty(first(body('Get_records')?['value'])?['Status']))), toLower(first(body('Get_records')?['value'])?['Status']), '')",
+                              "closed"
+                            ]
+                          }
+                        ]
+                      },
+                      "type": "If"
+                    }
+                  },
+                  "runAfter": {
+                    "Is_redirected_incident": [
+                      "Succeeded"
+                    ]
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "expression": {
+                    "or": [
+                      {
+                        "equals": [
+                          "@body('Get_incident_details')?['redirectIncidentId']",
+                          null
+                        ]
+                      },
+                      {
+                        "equals": [
+                          "@string(body('Get_incident_details')?['redirectIncidentId'])",
+                          ""
+                        ]
+                      }
+                    ]
+                  },
+                  "type": "If"
+                }
+              },
+              "runAfter": {
+                "Parse_JSON_from_incident_updates": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Foreach",
+              "runtimeConfiguration": {
+                "concurrency": {
+                  "repetitions": 1
+                }
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "type": "object",
+            "value": {
+              "salesforce-1": {
+                "id": "[concat('/subscriptions/c410f6a1-26e0-4d77-a2c0-f5801cceaf70/providers/Microsoft.Web/locations/', parameters('location'), '/managedApis/salesforce')]",
+                "connectionId": "/subscriptions/c410f6a1-26e0-4d77-a2c0-f5801cceaf70/resourceGroups/ServiceCloudTicketing_rg/providers/Microsoft.Web/connections/salesforce",
+                "connectionName": "salesforce",
+                "connectionProperties": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

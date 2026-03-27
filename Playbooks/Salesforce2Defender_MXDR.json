@@ -1,0 +1,290 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "Salesforce2Defender"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "tenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "Customer tenant ID used to scope Sentinel_Arm_ID__c case updates for this playbook deployment."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2017-07-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            }
+          },
+          "triggers": {
+            "When_a_record_is_modified": {
+              "recurrence": {
+                "interval": 5,
+                "frequency": "Minute",
+                "timeZone": "GMT Standard Time"
+              },
+              "evaluatedRecurrence": {
+                "interval": 5,
+                "frequency": "Minute",
+                "timeZone": "GMT Standard Time"
+              },
+              "splitOn": "@coalesce(triggerBody()?['body']?['value'], triggerBody()?['value'])",
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['salesforce']['connectionId']"
+                  }
+                },
+                "method": "get",
+                "path": "/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/onupdateditems",
+                "queries": {
+                  "$filter": "[concat(\"RecordTypeId eq '0123z000000t6U9AAI' and Reason eq 'Security' and Origin eq 'Microsoft Defender XDR' and contains(Sentinel_Arm_ID__c, '\", parameters('tenantId'), \"_')\")]"
+                }
+              }
+            }
+          },
+          "actions": {
+            "Case": {
+              "runAfter": {},
+              "type": "Compose",
+              "inputs": "@coalesce(triggerBody()?['body']?['value']?[0], triggerBody()?['value']?[0], triggerBody()?['body'], triggerBody())"
+            },
+            "Condition": {
+              "actions": {
+                "Update_record_(V3)": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['salesforce']['connectionId']"
+                      }
+                    },
+                    "method": "patch",
+                    "body": {
+                      "BusinessHoursId": "01m3z000000olnX",
+                      "Updated_From_Defender__c": false
+                    },
+                    "path": "/v3/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('Case'))}/items/@{encodeURIComponent(encodeURIComponent(outputs('Case')?['Id']))}"
+                  }
+                }
+              },
+              "runAfter": {
+                "Case": [
+                  "Succeeded"
+                ]
+              },
+              "else": {
+                "actions": {
+                  "Extract_IncidentId": {
+                    "type": "Compose",
+                    "inputs": "@last(split(string(outputs('Case')?['Sentinel_Arm_ID__c']), '_'))"
+                  },
+                  "Map_Status": {
+                    "runAfter": {
+                      "Extract_IncidentId": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": "@if(\n  equals(toLower(outputs('Case')?['Status']), 'new'),\n    'active',\n  if(\n    equals(toLower(outputs('Case')?['Status']), 'open'),\n      'inProgress',\n    if(\n      equals(toLower(outputs('Case')?['Status']), 'closed'),\n        'resolved',\n      if(\n        equals(toLower(outputs('Case')?['Status']), 'pending'),\n          null,\n          null\n      )\n    )\n  )\n)\n"
+                  },
+                  "Classification_Map": {
+                    "runAfter": {
+                      "Map_Status": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": {
+                      "True Positive": "truePositive",
+                      "False Positive": "falsePositive",
+                      "Informational, Expected Activity": "informationalExpectedActivity",
+                      "Unknown": "unknown",
+                      "Not Set": "unknown"
+                    }
+                  },
+                  "Classification_Selected": {
+                    "runAfter": {
+                      "Classification_Map": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": "@if(\n  empty(trim(string(outputs('Case')?['Reason_Details_Impact__c']))),\n  'unknown',\n  if(\n    contains(outputs('Classification_Map'), trim(string(outputs('Case')?['Reason_Details_Impact__c']))),\n    outputs('Classification_Map')[trim(string(outputs('Case')?['Reason_Details_Impact__c']))],\n    'unknown'\n  )\n)"
+                  },
+                  "Determination_Map": {
+                    "runAfter": {
+                      "Classification_Selected": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": {
+                      "Multi Staged Attack": "multiStagedAttack",
+                      "Malware": "malware",
+                      "Malicious User Activity": "maliciousUserActivity",
+                      "Unwanted Software": "unwantedSoftware",
+                      "Phishing": "phishing",
+                      "Compromised Account": "compromisedAccount",
+                      "Security Testing": "securityTesting",
+                      "Confirmed Activity": "confirmedActivity",
+                      "Line of Business Application": "lineOfBusinessApplication",
+                      "Not Enough Data To Validate": "notEnoughDataToValidate",
+                      "Not Malicious": "notMalicious",
+                      "Unknown": "unknown",
+                      "Other": "other",
+                      "Not Set": "unknown"
+                    }
+                  },
+                  "Determination_Selected": {
+                    "runAfter": {
+                      "Determination_Map": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": "@if(\n  empty(trim(string(outputs('Case')?['Details_Impact_Sub_Category__c']))),\n  'unknown',\n  if(\n    contains(outputs('Determination_Map'), trim(string(outputs('Case')?['Details_Impact_Sub_Category__c']))),\n    outputs('Determination_Map')[trim(string(outputs('Case')?['Details_Impact_Sub_Category__c']))],\n    'unknown'\n  )\n)"
+                  },
+                  "Get_User_By_Owner_ID__c": {
+                    "runAfter": {
+                      "Determination_Selected": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "ApiConnection",
+                    "inputs": {
+                      "host": {
+                        "connection": {
+                          "name": "@parameters('$connections')['salesforce']['connectionId']"
+                        }
+                      },
+                      "method": "get",
+                      "path": "/datasets/default/tables/@{encodeURIComponent(encodeURIComponent('User'))}/items",
+                      "queries": {
+                        "$filter": "@concat('Id eq ''', outputs('Case')?['Owner_ID__c'], '''')",
+                        "$top": 1
+                      }
+                    }
+                  },
+                  "AssignedTo_Selected": {
+                    "runAfter": {
+                      "Get_User_By_Owner_ID__c": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "Compose",
+                    "inputs": "@coalesce(\n  first(body('Get_User_By_Owner_ID__c')?['value'])?['Email'],\n  first(body('Get_User_By_Owner_ID__c')?['value'])?['Username'],\n  first(body('Get_User_By_Owner_ID__c')?['value'])?['Name'],\n  null\n)"
+                  },
+                  "Condition_IncidentId_Present": {
+                    "actions": {
+                      "PATCH_Defender_Incident": {
+                        "type": "Http",
+                        "inputs": {
+                          "uri": "@concat('https://graph.microsoft.com/v1.0/security/incidents/', outputs('Extract_IncidentId'))",
+                          "method": "PATCH",
+                          "body": {
+                            "status": "@{outputs('Map_Status')}",
+                            "classification": "@{outputs('Classification_Selected')}",
+                            "determination": "@{outputs('Determination_Selected')}",
+                            "assignedTo": "@{outputs('AssignedTo_Selected')}"
+                          },
+                          "authentication": {
+                            "type": "ManagedServiceIdentity",
+                            "audience": "https://graph.microsoft.com"
+                          }
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "AssignedTo_Selected": [
+                        "Succeeded"
+                      ]
+                    },
+                    "else": {
+                      "actions": {}
+                    },
+                    "expression": {
+                      "and": [
+                        {
+                          "not": {
+                            "equals": [
+                              "@outputs('Extract_IncidentId')",
+                              null
+                            ]
+                          }
+                        },
+                        {
+                          "not": {
+                            "equals": [
+                              "@string(outputs('Extract_IncidentId'))",
+                              ""
+                            ]
+                          }
+                        },
+                        {
+                          "not": {
+                            "equals": [
+                              "@outputs('Map_Status')",
+                              null
+                            ]
+                          }
+                        }
+                      ]
+                    },
+                    "type": "If"
+                  }
+                }
+              },
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@outputs('Case')?['Updated_From_Defender__c']",
+                      true
+                    ]
+                  }
+                ]
+              },
+              "type": "If"
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "salesforce": {
+                "id": "[concat('/subscriptions/c410f6a1-26e0-4d77-a2c0-f5801cceaf70/providers/Microsoft.Web/locations/', parameters('location'), '/managedApis/salesforce')]",
+                "connectionId": "/subscriptions/c410f6a1-26e0-4d77-a2c0-f5801cceaf70/resourceGroups/ServiceCloudTicketing_rg/providers/Microsoft.Web/connections/salesforce",
+                "connectionName": "salesforce",
+                "connectionProperties": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
